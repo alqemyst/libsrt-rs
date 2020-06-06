@@ -1,50 +1,86 @@
-use failure::{self as f, Error};
-use std::borrow::Cow;
-use std::io::{self, Write};
-use std::path::Path;
-use std::process;
-use std::thread;
-use std::time::Duration;
+#[macro_use]
+extern crate log;
 
-use libsrt_rs::net::Builder;
-use libsrt_rs::net::Connect;
-use libsrt_rs::net::{EventKind, Events, Poll, Token};
+use failure::{self as f, Error};
+use std::{
+    borrow::Cow,
+    io::{self, Write},
+    net::SocketAddr,
+    path::Path,
+    process,
+    thread,
+    time::Duration,
+};
+use libsrt_rs::net::{
+    Builder,
+    Connect,
+    EventKind,
+    Events,
+    Poll,
+    Token,
+};
 
 fn main() {
-    if let Err(err) = run() {
+    let _ = env_logger::init();
+
+    let args: Vec<String> = std::env::args().collect();
+    let opts = match get_opts(&args) {
+        Ok(res) => res,
+        Err(err) => {
+            eprintln!("Usage: {} IP:PORT", prog_name(&args[0]));
+            eprintln!("{}", err);
+            process::exit(1);
+        }
+    };
+
+    if let Err(err) = run(opts.addr) {
         eprintln!("{}", err);
         process::exit(1);
     }
 }
 
-fn run() -> Result<(), Error> {
-    const TOKEN: Token = Token(0);
+struct Options {
+    addr: SocketAddr,
+}
 
-    let args: Vec<String> = std::env::args().collect();
+fn get_opts(args: &[String]) -> Result<Options, Error> {
     if args.len() < 2 {
-        return Err(f::err_msg(format!("Usage: {} IP:PORT", prog_name(&args[0]))));
+        return Err(f::err_msg(format!("no target address")));
     }
+
+    Ok(Options { addr: args[1].parse()? })
+}
+
+fn prog_name(path: &str) -> Cow<str> {
+    Path::new(path).file_name().unwrap().to_string_lossy()
+}
+
+fn run(addr: impl Into<SocketAddr> + 'static) -> Result<(), Error> {
+    env_logger::init()?;
+
+    const TOKEN: Token = Token(0);
 
     let poll = Poll::new()?;
     let mut events = Events::with_capacity(2);
 
-    let addr = args[1].parse()?;
     let mut stream = Builder::new()
         .nonblocking(true)
-        .connect(&addr)?;
+        .connect(&addr.into())?;
 
     poll.register(&stream, TOKEN, EventKind::writable())?;
     poll.poll(&mut events, Some(Duration::from_millis(1000)))?;
     if events.iter().next().is_none() {
-        return Err(io::Error::new(io::ErrorKind::TimedOut, "connection timeout").into());
+        return Err(io::Error::new(io::ErrorKind::TimedOut,
+                                  "connection timeout").into());
     }
-    println!("connection established to {}", stream.peer_addr()?);
+    info!("connection established to {}", stream.peer_addr()?);
 
-    poll.reregister(&stream, TOKEN, EventKind::writable() | EventKind::error())?;
+    poll.reregister(&stream,
+                    TOKEN, EventKind::writable() | EventKind::error())?;
 
     let message = format!("This message should be sent to the other side");
     'outer: for i in 0..100 {
-        println!("write #{} {}", i, message);
+        info!("write #{} {}", i, message);
 
         let mut _nsent = 0;
         loop {
@@ -56,7 +92,7 @@ fn run() -> Result<(), Error> {
                 match event.token() {
                     TOKEN => {
                         if event.kind().is_error() {
-                            println!("connection closed");
+                            info!("connection closed");
                             break 'outer;
                         }
                     }
@@ -91,8 +127,4 @@ fn run() -> Result<(), Error> {
     poll.deregister(&stream)?;
 
     Ok(())
-}
-
-fn prog_name(path: &str) -> Cow<str> {
-    Path::new(path).file_name().unwrap().to_string_lossy()
 }
